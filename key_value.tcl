@@ -44,10 +44,17 @@ oo::class create ::nats::key_value {
     return [dict get $resp seq]
   }
 
-  method del {bucket key} {
-    set subject "\$KV.${bucket}.${key}"
-    set resp [$jetStream publish $subject "" -header [list KV-Operation DEL]]
-    return $resp
+  method del {bucket {key ""}} {
+    if {$key ne ""} {
+      set subject "\$KV.${bucket}.${key}"
+      set resp [$jetStream publish $subject "" -header [list KV-Operation DEL]]
+      return
+    }
+
+    set stream "KV_${bucket}"
+    $jetStream delete_stream $stream
+
+    return 
   }
 
   method purge {bucket key} {
