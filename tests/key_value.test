@@ -126,6 +126,16 @@ test key_value-1.7 "Delete bucket" -constraints nats_cli -setup {
     set err
 } -result {nats: error: nats: bucket not found}
 
+test key_value-1.8 "Add bucket" -constraints nats_cli -body {
+    set jet_stream [$conn jet_stream]
+    set kv [$jet_stream key_value]
+    $kv add $bucket
+
+    execNatsCmd kv info $bucket
+} -result {} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
 # This should be the last test case in the file!
 test key_value-99 "Finalize the tests" -constraints nats_cli -body {
     # because of nats_cli constraint, this cleanup can't be done in the global scope
