@@ -57,60 +57,61 @@ oo::class create ::nats::key_value {
     return 
   }
 
-  method add {bucket args} {
-    set stream "KV_${bucket}"
-    set subject "\$KV.${bucket}.>"
-    set options {
-      -storage file
-      -retention limits
-      -discard new
-      -max_msgs_per_subject 1
-      -num_replicas 1
-      -max_msgs -1
-      -max_msg_size -1
-      -max_bytes -1
-      -max_age -1
-      -duplicate_window 120000
-      -deny_delete 1
-      -deny_purge 0
-      -allow_rollup_hdrs 1
-    }
+####### ADDING IS UNTESTED ########
+# method add {bucket args} {
+#  set stream "KV_${bucket}"
+#     set subject "\$KV.${bucket}.>"
+#     set options {
+#       -storage file
+#       -retention limits
+#       -discard new
+#       -max_msgs_per_subject 1
+#       -num_replicas 1
+#       -max_msgs -1
+#       -max_msg_size -1
+#       -max_bytes -1
+#       -max_age -1
+#       -duplicate_window 120000
+#       -deny_delete 1
+#       -deny_purge 0
+#       -allow_rollup_hdrs 1
+#     }
 
-    set argsMap {
-      -history -max_msgs_per_subject
-      -storage -storage
-      -ttl -max_age
-      -replicas -num_replicas
-      -max_value_size -max_msg_size
-      -max_bucket_size -max_bytes
-    }
+#     set argsMap {
+#       -history -max_msgs_per_subject
+#       -storage -storage
+#       -ttl -max_age
+#       -replicas -num_replicas
+#       -max_value_size -max_msg_size
+#       -max_bucket_size -max_bytes
+#     }
 
-    dict for {key value} $args {
-      if {![dict exists $argsMap $key]} {
-        throw {NATS ErrInvalidArg} "Unknown option ${key}"
-      }
-      switch $key -- {
-        -history {
-          if {$value < 1} {
-            throw {NATS ErrInvalidArg} "max_msgs_per_subject must be greater than 0"
-          }
-          if {$value > 64} {
-            throw {NATS ErrInvalidArg} "max_msgs_per_subject must be less than 64"
-          }
+#     dict for {key value} $args {
+#       if {![dict exists $argsMap $key]} {
+#         throw {NATS ErrInvalidArg} "Unknown option ${key}"
+#       }
+#       switch $key -- {
+#         -history {
+#           if {$value < 1} {
+#             throw {NATS ErrInvalidArg} "max_msgs_per_subject must be greater than 0"
+#           }
+#           if {$value > 64} {
+#             throw {NATS ErrInvalidArg} "max_msgs_per_subject must be less than 64"
+#           }
 
-          dict set options [dict get $argsMap $key] $value
-        }
-        default {
-          dict set options [dict get $argsMap $key] $value
-        }
-      }
-    }
-    puts $options
+#           dict set options [dict get $argsMap $key] $value
+#         }
+#         default {
+#           dict set options [dict get $argsMap $key] $value
+#         }
+#       }
+#     }
+#     puts $options
 
-    $jetStream add_stream $stream -subjects $subject {*}$options
+#     $jetStream add_stream $stream -subjects $subject {*}$options
 
-    return 
-  }
+#     return 
+#   }
 
   method purge {bucket key} {
     set subject "\$KV.${bucket}.${key}"
