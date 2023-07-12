@@ -21,15 +21,11 @@ oo::class create ::nats::key_value {
       throw {NATS KeyNotFound} "Key ${key} not found"
     } 
 
-    set msg [dict get $resp message]
-
-    if {[dict exists $msg hdrs]} {
-      dict set msg headers [::nats::parse_header [binary decode base64 [dict get $msg hdrs]]]
-    }
+    set msg $resp
 
     # handle case when key value has been deleted or purged
-    if {[dict exists $msg headers KV-Operation]} {
-      set op [dict get $msg headers KV-Operation]
+    if {[dict exists $msg header KV-Operation]} {
+      set op [dict get $msg header KV-Operation]
       if {$op in [list "DEL" "PURGE"]} {
         throw {NATS KeyNotFound} "Key ${key} not found"
       }
@@ -40,14 +36,14 @@ oo::class create ::nats::key_value {
 
   method put {bucket key value} {
     set subject "\$KV.${bucket}.${key}"
-    set resp [$jetStream publish $subject $value]
+    set resp [$jetStream publish $subject [dict create data $value]]
     return [dict get $resp seq]
   }
 
   method del {bucket {key ""}} {
     if {$key ne ""} {
       set subject "\$KV.${bucket}.${key}"
-      set resp [$jetStream publish $subject "" -header [list KV-Operation DEL]]
+      set resp [$jetStream publish $subject [dict create data "" header [list KV-Operation DEL]]]
       return
     }
 
@@ -115,7 +111,7 @@ oo::class create ::nats::key_value {
 
   method purge {bucket key} {
     set subject "\$KV.${bucket}.${key}"
-    set resp [$jetStream publish $subject "" -header [list KV-Operation PURGE Nats-Rollup sub]]
+    set resp [$jetStream publish $subject [dict create data "" header [list KV-Operation PURGE Nats-Rollup sub]]]
     return $resp
   }
 
