@@ -6,10 +6,13 @@
 
 oo::class create ::nats::jet_stream {
     variable conn _timeout api_prefix pull_reqs
+
+    variable kv
     
     # do NOT call directly! instead use [$connection jet_stream]
     constructor {c t d} {
         set conn $c
+        set kv ""
         set _timeout $t ;# avoid clash with -timeout option when using _parse_args
         if {$d eq ""} {
             set api_prefix \$JS.API
@@ -470,6 +473,15 @@ oo::class create ::nats::jet_stream {
             return [list]
         }
         return [dict get $response streams]
+    }
+
+    ### KV STORE ###
+
+    method key_value {} {
+        if {$kv eq ""} {
+            set kv [::nats::key_value new [self]]
+        }
+        return $kv
     }
     
     # userCallback args: timedOut pubAck error
