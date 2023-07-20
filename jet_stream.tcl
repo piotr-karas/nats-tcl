@@ -477,11 +477,11 @@ oo::class create ::nats::jet_stream {
 
     ### KV STORE ###
 
-    method key_value {} {
-        if {$kv eq ""} {
-            set kv [::nats::key_value new [self]]
+    method key_value {args} {
+        nats::_parse_args $args {
+            check_bucket bool true
         }
-        return $kv
+        return [::nats::key_value new [self] $check_bucket]
     }
     
     # userCallback args: timedOut pubAck error

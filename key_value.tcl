@@ -3,30 +3,50 @@
 
 namespace eval ::nats {}
 
-oo::class create ::nats::key_value {
-  variable jetStream
+# TODO timestamps format
+# TODO validation of keys/bucket (with "." inside)
+# TODO documentation
 
-  constructor {js} {
-    set jetStream $js
+# based on https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md
+oo::class create ::nats::key_value {
+  variable js
+  variable check_bucket_default
+
+  constructor {jet_stream check_bucket} {
+    set js $jet_stream
+    set check_bucket_default $check_bucket
   }
 
-  method get {bucket key} {
+  method get {bucket key args} {
+    nats::_parse_args $args {
+      revision pos_int null
+    }
+
     set stream "KV_${bucket}"
     set subject "\$KV.${bucket}.${key}"
 
-    # handle case when no values have been set for this key
     try {
-      set resp [$jetStream stream_msg_get $stream -last_by_subj $subject]
-    } trap {NATS ErrJSResponse 404} {} {
-      throw {NATS KeyNotFound} "Key ${key} not found"
-    } 
+      if {[info exists revision]} {
+        set resp [$js stream_msg_get $stream -seq $revision]
 
+        if {[dict exists $resp subject] && [dict get $resp subject] ne $subject} {
+          throw {NATS KeyNotFound} "Key ${key} not found"
+        }
+      } else {
+        set resp [$js stream_msg_get $stream -last_by_subj $subject]
+      }
+    } trap {NATS ErrJSResponse 404 10037} {} {
+      throw {NATS KeyNotFound} "Key ${key} not found"
+    } trap {NATS ErrJSResponse 404 10059} {} {
+      throw {NATS BucketNotFound} "Bucket ${bucket} not found"
+    }
+    
     set msg $resp
 
     # handle case when key value has been deleted or purged
-    if {[dict exists $msg header KV-Operation]} {
-      set op [dict get $msg header KV-Operation]
-      if {$op in [list "DEL" "PURGE"]} {
+    if {[dict exists $msg header]} {
+      set operation [nats::header lookup $msg KV-Operation ""]
+      if {$operation in [list "DEL" "PURGE"]} {
         throw {NATS KeyNotFound} "Key ${key} not found"
       }
     }
@@ -34,23 +54,135 @@ oo::class create ::nats::key_value {
     return [my message_to_entry $msg]
   }
 
-  method put {bucket key value} {
+  method put {bucket key value args} {
+    nats::_parse_args $args [list \
+      check_bucket bool $check_bucket_default \
+    ]
+
+    if {$check_bucket} {
+      my _checkBucket $bucket
+    }
+
     set subject "\$KV.${bucket}.${key}"
-    set resp [$jetStream publish $subject [dict create data $value]]
+    set resp [$js publish $subject $value]
     return [dict get $resp seq]
   }
 
-  method del {bucket {key ""}} {
+  method create {bucket key value args} {
+    nats::_parse_args $args [list \
+      check_bucket bool $check_bucket_default \
+    ]
+
+    if {$check_bucket} {
+      my _checkBucket $bucket
+    }
+
+    set subject "\$KV.${bucket}.${key}"
+
+    set msg [nats::msg create $subject -data $value]
+    nats::header set msg Nats-Expected-Last-Subject-Sequence 0
+    
+    try {
+      set resp [$js publish_msg $msg]
+    } trap {NATS ErrJSResponse 400 10071} {msg} {
+      throw {NATS WrongLastSequence} $msg
+    }
+
+    return [dict get $resp seq]
+  }
+
+  method update {bucket key value revision args} {
+    nats::_parse_args $args [list \
+      check_bucket bool $check_bucket_default \
+    ]
+
+    if {$check_bucket} {
+      my _checkBucket $bucket
+    }
+
+    set subject "\$KV.${bucket}.${key}"
+
+    set msg [nats::msg create $subject -data $value]
+    nats::header set msg Nats-Expected-Last-Subject-Sequence $revision
+
+    try {
+      set resp [$js publish_msg $msg]
+    } trap {NATS ErrJSResponse 400 10071} {msg} {
+      throw {NATS WrongLastSequence} $msg
+    }
+
+    return [dict get $resp seq]
+  }
+
+  method del {bucket args} {
+    set key ""
+
+    # first argument is not a flag - it is key name
+    if {[string index [lindex $args 0] 0] ne "-"} {
+      set key [lindex $args 0]
+      set args [lrange $args 1 end]
+    }
+
+    nats::_parse_args $args [list \
+      check_bucket bool $check_bucket_default \
+    ]
+
+    if {$check_bucket} {
+      my _checkBucket $bucket
+    }
+
     if {$key ne ""} {
       set subject "\$KV.${bucket}.${key}"
-      set resp [$jetStream publish $subject [dict create data "" header [list KV-Operation DEL]]]
+      set msg [nats::msg create $subject]
+      nats::header set msg KV-Operation DEL
+      set resp [$js publish_msg $msg]
       return
     }
 
     set stream "KV_${bucket}"
-    $jetStream delete_stream $stream
+    try {
+      $js delete_stream $stream
+    } trap {NATS ErrJSResponse 404 10059} {} {
+      throw {NATS BucketNotFound} "Bucket ${bucket} not found"
+    }
 
-    return 
+    return
+  }
+
+  method purge {bucket key args} {
+    nats::_parse_args $args [list \
+      check_bucket bool $check_bucket_default \
+    ]
+
+    if {$check_bucket} {
+      my _checkBucket $bucket
+    }
+
+    set subject "\$KV.${bucket}.${key}"
+
+    set msg [nats::msg create $subject]
+    nats::header set msg KV-Operation PURGE Nats-Rollup sub
+    set resp [$js publish_msg $msg]
+
+    return $resp
+  }
+
+  method revert {bucket key revision} {
+    set entry [my get $bucket $key -revision $revision]
+
+    set subject "\$KV.${bucket}.${key}"
+    set resp [$js publish $subject [dict get $entry value]]
+    return [dict get $resp seq]
+  }
+
+  # check stream info to know if given stream even exists, in order to not wait for timeout if it doesn't
+  method _checkBucket {bucket} {
+    set stream "KV_${bucket}"
+    try {
+      set stream_info [$js stream_info $stream]
+    } trap {NATS ErrJSResponse 404 10059} {} {
+      throw {NATS BucketNotFound} "Bucket ${bucket} not found"
+    }
   }
 
 ####### ADDING IS UNTESTED ########
@@ -104,16 +236,10 @@ oo::class create ::nats::key_value {
 #     }
 #     puts $options
 
-#     $jetStream add_stream $stream -subjects $subject {*}$options
+#     $js add_stream $stream -subjects $subject {*}$options
 
 #     return 
 #   }
-
-  method purge {bucket key} {
-    set subject "\$KV.${bucket}.${key}"
-    set resp [$jetStream publish $subject [dict create data "" header [list KV-Operation PURGE Nats-Rollup sub]]]
-    return $resp
-  }
 
   method message_to_entry {msg} {
     # return dict representation of Entry https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md#entry
@@ -156,7 +282,7 @@ oo::class create ::nats::key_value {
 # 2023-05-30T07:06:22.864305Z
 proc ::nats::time_to_millis {time} {
   set millis 0
-  if {[regexp -all {^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2}).(\d{6})Z$} $time -> year month day hour minute second micro]} {
+  if {[regexp -all {^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2}).(\d+)Z$} $time -> year month day hour minute second micro]} {
     set micro [string trimleft $micro 0]
     set millis [clock scan "${year}-${month}-${day} ${hour}:${minute}:${second}" -format "%Y-%m-%d %T" -gmt 1]
     return  [expr {$millis + ($micro / 1000)}]

@@ -16,76 +16,246 @@ tcltest::customMatch dict {apply {{expected actual} {
   return 1
 }}}
 
-set bucket MY_BUCKET
+set bucket MY_TEST_BUCKET
+startNats NATS_JS -js ;# start nats with Jet Stream
 
-test key_value-1.1 "Get existing key" -setup {
-    startNats NATS_JS -js ;# start nats with Jet Stream    
-    
+set conn [nats::connection new]
+$conn configure -servers nats://localhost:4222
+$conn connect
+set jet_stream [$conn jet_stream]
+set kv [$jet_stream key_value]
+
+# cleanup if previous test has not cleaned up correctly
+execNatsCmd kv add $bucket
+execNatsCmd kv del $bucket -f
+
+########## GET ##########
+
+test key_value-get-1.1 "Get existing key" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket key1 value1
-    set conn [nats::connection new]
-    
-    #debugLogging $conn
-    $conn configure -servers nats://localhost:4222
-    $conn connect
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
     set value [$kv get $bucket key1]
-
     dict filter $value key value key operation bucket revision
 } -match dict -result [dict create value value1 operation PUT key key1 bucket $bucket revision 1] -cleanup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.2 "Throw KeyNotFound for not existing key" -setup {
+test key_value-get-1.2 "Get existing key for specified revision" -setup {
+    execNatsCmd kv add $bucket --history=5
+    execNatsCmd kv put $bucket key1 value1
+    execNatsCmd kv put $bucket key1 target_value
+    execNatsCmd kv put $bucket key1 value3
+} -body {
+    set value [$kv get $bucket key1 -revision 2]
+    dict filter $value key value key operation bucket revision
+} -match dict -result [dict create value target_value operation PUT key key1 bucket $bucket revision 2] -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-get-1.3 "Throw KeyNotFound for non-existing key" -setup {
     execNatsCmd kv add $bucket
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
-    catch {
+    if {![catch {
         $kv get $bucket key1
-    } err errOpts
-    puts $errOpts
-    puts $err
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
     assert {[dict get $errOpts -errorcode] eq {NATS KeyNotFound}}
     set err
 } -result {Key key1 not found} -cleanup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.3 "Throw KeyNotFound for deleted key" -setup {
+test key_value-get-1.4 "Throw KeyNotFound for deleted key" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket key1 value1
     execNatsCmd kv del $bucket key1 -f
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
-    catch {
+    if {![catch {
         $kv get $bucket key1
-    } err errOpts
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
     assert {[dict get $errOpts -errorcode] eq {NATS KeyNotFound}}
     set err
 } -result {Key key1 not found} -cleanup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.4 "Put key" -setup {
+test key_value-get-1.5 "Throw KeyNotFound for non-existing revision" -setup {
+    execNatsCmd kv add $bucket
+    execNatsCmd kv put $bucket key1 value1
+} -body {
+    if {![catch {
+        $kv get $bucket key1 -revision 2
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS KeyNotFound}}
+    set err
+} -result {Key key1 not found} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-get-1.6 "Throw KeyNotFound for specified revision, that belongs to another key" -setup {
+    execNatsCmd kv add $bucket
+    execNatsCmd kv put $bucket key1 value1
+    execNatsCmd kv put $bucket key2 value2
+} -body {
+    if {![catch {
+        $kv get $bucket key1 -revision 2
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS KeyNotFound}}
+    set err
+} -result {Key key1 not found} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-get-1.7 "Throw BucketNotFound for non existing bucket" -body {
+    if {![catch {
+        $kv get $bucket key1
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket $bucket not found"
+
+# ########## PUT ##########
+
+test key_value-put-1.1 "Put key" -setup {
     execNatsCmd kv add $bucket
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
-    $kv put $bucket key1 value1
+    set revision [$kv put $bucket key1 value1]
+
+    set new_val [exec nats kv get $bucket key1 --raw]
+    assert {$new_val eq "value1"}
+
+    set revision
 } -result {1} -cleanup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.5 "Delete key" -setup {
+test key_value-put-1.2 "Throw BucketNotFound when calling put on non-existing bucket with -check_bucket set to true" -body {
+    if {![catch {
+        $kv put "non-existing-bucket" key1 value1 -check_bucket true
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-put-1.3 "Throw NoResponders/Timeout when calling put on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv put "non-existing-bucket" key1 value1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+########## CREATE ##########
+
+test key_value-create-1.1 "Create key" -setup {
+    execNatsCmd kv add $bucket
+} -body {
+    $kv create $bucket key1 value1
+} -result {1} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-create-1.2 "Throw WrongLastSequence if key already exists" -setup {
+    execNatsCmd kv add $bucket
+    execNatsCmd kv put $bucket key1 some_val
+} -body {
+    if {![catch {
+        $kv create $bucket key1 value1
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS WrongLastSequence}}
+    set err
+} -result "wrong last sequence: 1" -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-create-1.3 "Throw BucketNotFound when calling create on non-existing bucket with -check_bucket set to true" -body {
+    if {![catch {
+        $kv create "non-existing-bucket" key1 value1 -check_bucket true
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-create-1.4 "Throw NoResponders/Timeout when calling create on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv create "non-existing-bucket" key1 value1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+########## UPDATE ##########
+
+test key_value-update-1.1 "Update key" -setup {
+    execNatsCmd kv add $bucket
+    execNatsCmd kv put $bucket key1 some_val
+} -body {
+    $kv update $bucket key1 value1 1
+} -result {2} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-update-1.2 "Throw WrongLastSequence if revision does not match with requested" -setup {
+    execNatsCmd kv add $bucket
+    execNatsCmd kv put $bucket key1 some_val
+} -body {
+    if {![catch {
+        $kv update $bucket key1 value1 2
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS WrongLastSequence}}
+    set err
+} -result "wrong last sequence: 1" -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-update-1.3 "Throw BucketNotFound when calling update on non-existing bucket with -check_bucket set to true" -body {
+    if {![catch {
+        $kv update "non-existing-bucket" key1 value1 1 -check_bucket true
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-update-1.4 "Throw NoResponders/Timeout when calling update on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv update "non-existing-bucket" key1 value1 1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+########## DELETE ##########
+
+test key_value-delete-1.1 "Delete key" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket key1 value1
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
     $kv del $bucket key1
 
     catch { exec nats kv get $bucket key1 --raw } err errOpts
@@ -94,14 +264,53 @@ test key_value-1.5 "Delete key" -setup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.6 "Purge key" -setup {
-    execNatsCmd kv add $bucket --history 4
+test key_value-delete-1.2 "Delete bucket" -setup {
+    execNatsCmd kv add $bucket
+} -body {
+    $kv del $bucket 
+
+    catch { exec nats kv info $bucket } err errOpts
+    set err
+} -result {nats: error: nats: bucket not found}
+
+test key_value-del-1.3 "Throw BucketNotFound when calling del on key on non-existing bucket with -check_bucket set to true" -body {
+    if {![catch {
+        $kv del "non-existing-bucket" key1 -check_bucket true
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-del-1.4 "Throw NoResponders/Timeout when calling del on key on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv del "non-existing-bucket" key1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+test key_value-del-1.5 "Throw BucketNotFound when calling del on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv del "non-existing-bucket" key1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+########### PURGE ##########
+
+test key_value-purge-1.1 "Purge key" -setup {
+    execNatsCmd kv add $bucket --history 5
     execNatsCmd kv put $bucket key1 value1
     execNatsCmd kv put $bucket key1 value2
     execNatsCmd kv put $bucket key1 value3
 } -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
     $kv purge $bucket key1
 
     catch { exec nats kv get $bucket key1 --raw } err errOpts
@@ -110,20 +319,71 @@ test key_value-1.6 "Purge key" -setup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value-1.7 "Delete bucket" -setup {
-    execNatsCmd kv add $bucket
-} -body {
-    set jet_stream [$conn jet_stream]
-    set kv [$jet_stream key_value]
-    $kv del $bucket 
-
-    catch { exec nats kv info $bucket } err errOpts
+test key_value-purge-1.2 "Throw BucketNotFound when calling purge on non-existing bucket with -check_bucket set to true" -body {
+    if {![catch {
+        $kv purge "non-existing-bucket" key1 -check_bucket true
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
     set err
-} -result {nats: error: nats: bucket not found}
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-purge-1.3 "Throw NoResponders/Timeout when calling purge on non-existing bucket with -check_bucket set to false" -body {
+    if {![catch {
+        $kv purge "non-existing-bucket" key1 -check_bucket false
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS ErrNoResponders}}
+    set err
+} -result "No responders available for request"
+
+########### REVERT ##########
+
+test key_value-revert-1.1 "Revert key" -setup {
+    execNatsCmd kv add $bucket --history 5
+    execNatsCmd kv put $bucket key1 value1
+    execNatsCmd kv put $bucket key1 value2
+    execNatsCmd kv put $bucket key1 value3
+} -body {
+    set new_revision [$kv revert $bucket key1 2]
+
+    set new_val [exec nats kv get $bucket key1 --raw]
+    assert {$new_val eq "value2"}
+
+    set new_revision
+} -result {4} -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+test key_value-revert-1.2 "Throw BucketNotFound when calling revert on non-existing bucket" -body {
+    if {![catch {
+        $kv revert "non-existing-bucket" key1 1
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS BucketNotFound}}
+    set err
+} -result "Bucket non-existing-bucket not found"
+
+test key_value-revert-1.3 "Throw KeyNotFound when calling revert on non-existing key" -setup {
+    execNatsCmd kv add $bucket --history 5
+} -body {
+    if {![catch {
+        $kv revert $bucket non-existing-key 1
+    } err errOpts]} {
+        throw {TEST DidNotThrow} "Did not throw"
+    }
+    assert {[dict get $errOpts -errorcode] eq {NATS KeyNotFound}}
+    set err
+} -result "Key non-existing-key not found" -cleanup {
+    execNatsCmd kv del $bucket -f
+}
+
+########### ADD ##########
 
 # test key_value-1.8 "Add bucket" -body {
-#     set jet_stream [$conn jet_stream]
-#     set kv [$jet_stream key_value]
 #     $kv add $bucket
 
 #     execNatsCmd kv info $bucket
@@ -131,10 +391,9 @@ test key_value-1.7 "Delete bucket" -setup {
 #     execNatsCmd kv del $bucket -f
 # }
 
-# This should be the last test case in the file!
-test key_value-99 "Finalize the tests" -body {
-    # because of nats_cli constraint, this cleanup can't be done in the global scope
-    $conn destroy
-    stopNats NATS_JS
-}
+$kv destroy
+$jet_stream destroy
+$conn destroy
+stopNats NATS_JS
+
 tcltest::cleanupTests
