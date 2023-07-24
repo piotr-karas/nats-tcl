@@ -480,8 +480,12 @@ oo::class create ::nats::jet_stream {
     method key_value {args} {
         nats::_parse_args $args {
             check_bucket bool true
+            timeout pos_int 0
         }
-        return [::nats::key_value new [self] $check_bucket]
+        if {$timeout == 0} {
+            set timeout $_timeout
+        }
+        return [::nats::key_value new $conn [self] $timeout $check_bucket]
     }
     
     # userCallback args: timedOut pubAck error

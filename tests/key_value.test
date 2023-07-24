@@ -17,13 +17,13 @@ tcltest::customMatch dict {apply {{expected actual} {
 }}}
 
 set bucket MY_TEST_BUCKET
-startNats NATS_JS -js ;# start nats with Jet Stream
+startNats NATS_JS -js --store_dir [tcltest::temporaryDirectory];# start nats with Jet Stream
 
 set conn [nats::connection new]
 $conn configure -servers nats://localhost:4222
 $conn connect
-set jet_stream [$conn jet_stream]
-set kv [$jet_stream key_value]
+set js [$conn jet_stream]
+set kv [$js key_value]
 
 # cleanup if previous test has not cleaned up correctly
 execNatsCmd kv add $bucket
@@ -381,18 +381,8 @@ test key_value-revert-1.3 "Throw KeyNotFound when calling revert on non-existing
     execNatsCmd kv del $bucket -f
 }
 
-########### ADD ##########
-
-# test key_value-1.8 "Add bucket" -body {
-#     $kv add $bucket
-
-#     execNatsCmd kv info $bucket
-# } -result {} -cleanup {
-#     execNatsCmd kv del $bucket -f
-# }
-
 $kv destroy
-$jet_stream destroy
+$js destroy
 $conn destroy
 stopNats NATS_JS
 

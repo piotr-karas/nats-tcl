@@ -9,12 +9,20 @@ namespace eval ::nats {}
 
 # based on https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md
 oo::class create ::nats::key_value {
+  variable conn
   variable js
   variable check_bucket_default
 
-  constructor {jet_stream check_bucket} {
+  variable _timeout
+  variable requests
+
+  constructor {connection jet_stream timeout check_bucket} {
+    set conn $connection
     set js $jet_stream
     set check_bucket_default $check_bucket
+
+    set _timeout $timeout ;# avoid clash with -timeout option when using _parse_args
+    array set requests {} ;# reqID -> dict
   }
 
   method get {bucket key args} {
@@ -185,61 +193,173 @@ oo::class create ::nats::key_value {
     }
   }
 
-####### ADDING IS UNTESTED ########
-# method add {bucket args} {
-#  set stream "KV_${bucket}"
-#     set subject "\$KV.${bucket}.>"
-#     set options {
-#       -storage file
-#       -retention limits
-#       -discard new
-#       -max_msgs_per_subject 1
-#       -num_replicas 1
-#       -max_msgs -1
-#       -max_msg_size -1
-#       -max_bytes -1
-#       -max_age -1
-#       -duplicate_window 120000
-#       -deny_delete 1
-#       -deny_purge 0
-#       -allow_rollup_hdrs 1
-#     }
+  ########## MANAGING ##########
 
-#     set argsMap {
-#       -history -max_msgs_per_subject
-#       -storage -storage
-#       -ttl -max_age
-#       -replicas -num_replicas
-#       -max_value_size -max_msg_size
-#       -max_bucket_size -max_bytes
-#     }
+  method add {bucket args} {
+    set stream "KV_${bucket}"
+    set subject "\$KV.${bucket}.>"
 
-#     dict for {key value} $args {
-#       if {![dict exists $argsMap $key]} {
-#         throw {NATS ErrInvalidArg} "Unknown option ${key}"
-#       }
-#       switch $key -- {
-#         -history {
-#           if {$value < 1} {
-#             throw {NATS ErrInvalidArg} "max_msgs_per_subject must be greater than 0"
-#           }
-#           if {$value > 64} {
-#             throw {NATS ErrInvalidArg} "max_msgs_per_subject must be less than 64"
-#           }
+    set options {
+      -storage file
+      -retention limits
+      -discard new
+      -max_msgs_per_subject 1
+      -num_replicas 1
+      -max_msgs -1
+      -max_msg_size -1
+      -max_bytes -1
+      -max_age 0
+      -duplicate_window 120000000000
+      -deny_delete 1
+      -deny_purge 0
+      -allow_rollup_hdrs 1
+    }
 
-#           dict set options [dict get $argsMap $key] $value
-#         }
-#         default {
-#           dict set options [dict get $argsMap $key] $value
-#         }
-#       }
-#     }
-#     puts $options
+    set argsMap {
+      -history -max_msgs_per_subject
+      -storage -storage
+      -ttl -max_age
+      -replicas -num_replicas
+      -max_value_size -max_msg_size
+      -max_bucket_size -max_bytes
+    }
 
-#     $js add_stream $stream -subjects $subject {*}$options
+    if {[llength $args] % 2} {
+      throw {NATS ErrInvalidArg} "Missing value for option [lindex $args end]"
+    }
 
-#     return 
-#   }
+    dict for {key value} $args {
+      if {![dict exists $argsMap $key]} {
+        throw {NATS ErrInvalidArg} "Unknown option ${key}. Should be one of [dict keys $argsMap]"
+      }
+      switch -- $key {
+        -history {
+          if {$value < 1} {
+            throw {NATS ErrInvalidArg} "history must be greater than 0"
+          }
+          if {$value > 64} {
+            throw {NATS ErrInvalidArg} "history must be less than 64"
+          }
+
+          dict set options [dict get $argsMap $key] $value
+        }
+        default {
+          dict set options [dict get $argsMap $key] $value
+        }
+      }
+    }
+
+    return [$js add_stream $stream -subjects $subject {*}$options]
+  }
+
+  method info {bucket} {
+    set stream "KV_${bucket}"
+    try {
+      set stream_info [$js stream_info $stream]
+    } trap {NATS ErrJSResponse 404 10059} {} {
+      throw {NATS BucketNotFound} "Bucket ${bucket} not found"
+    }
+
+    return $stream_info
+  }
+
+  method ls {} {
+    set streams [$js stream_names]
+    set kv_list [list]
+    foreach stream $streams {
+      if {[string range $stream 0 2] eq "KV_"} {
+        lappend kv_list [string range $stream 3 end]
+      }
+    }
+
+    return $kv_list
+  }
+
+  method keys {bucket args} {
+    set spec [list \
+      timeout pos_int $_timeout \
+    ]
+              
+    nats::_parse_args $args $spec
+
+    set stream "KV_${bucket}"
+    set subject "\$KV.${bucket}.>"
+    set deliver_subject [$conn inbox]
+
+    # get unique ID that will be used to send "add_consumer" request
+    set reqID [set ${conn}::counters(request)]
+    incr reqID
+
+    set requests($reqID) [dict create bucket $bucket timeout false num_received 0]
+    set subscription [$conn subscribe $deliver_subject -dictmsg true -callback [mymethod KeysWait $reqID]]
+    
+    # make sure it will return someday
+    after $timeout [mymethod KeysWait $reqID "" "" "" 1]
+    
+    try {
+      set consumer [$js add_consumer $stream \
+          -deliver_policy "last_per_subject" \
+          -ack_policy "none" \
+          -max_deliver 1 \
+          -filter_subject $subject \
+          -replay_policy "instant" \
+          -headers_only 1 \
+          -deliver_subject $deliver_subject \
+          -num_replicas 1]
+    } trap {NATS ErrJSResponse 404 10059} {msg} {
+      throw {NATS BucketNotFound} "Bucket ${bucket} not found"
+    }
+
+    set consumer_name [dict get $consumer name]
+    set num_pending [dict get $consumer num_pending]
+
+    # go further if num_pending = 0 (no keys found)
+    while {$num_pending > [dict get $requests($reqID) num_received] && ![dict get $requests($reqID) timeout]} {
+      # next message (key) or timeout was received
+      nats::_coroVwait [self object]::requests($reqID)
+    }
+
+    $js delete_consumer $stream $consumer_name
+    $conn unsubscribe $subscription
+    set keys [dict lookup $requests($reqID) keys]
+    set timeout_fired [dict get $requests($reqID) timeout]
+    set num_received [dict get $requests($reqID) num_received]
+    unset requests($reqID)
+
+    if {$timeout_fired && $num_pending > $num_received} {
+      throw {NATS ErrTimeout} "timeout"
+    }
+
+    return $keys
+  }
+
+  method KeysWait {reqID subject msg reply {timeout 0}} {
+    if {![info exists requests($reqID)]} {
+      return
+    }
+
+    if {$timeout} {
+      dict set requests($reqID) timeout true
+      return
+    }
+
+    dict incr requests($reqID) num_received
+
+    if {[dict exists $msg header]} {
+      set operation [nats::header lookup $msg KV-Operation ""]
+      if {$operation in [list "DEL" "PURGE"]} {
+        # key was deleted - do not add it
+        return;
+      }
+    }
+
+    set bucket [dict get $requests($reqID) bucket]
+    set key [string range $subject [expr {5 + [string length $bucket]}] end]
+
+    dict lappend requests($reqID) keys $key
+  }
+
+  ########## HELPERS ##########
 
   method message_to_entry {msg} {
     # return dict representation of Entry https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md#entry
