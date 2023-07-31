@@ -11,9 +11,15 @@ $conn connect
 set js [$conn jet_stream]
 set kv [$js key_value]
 
+# cleanup if previous test has not cleaned up correctly
+set ls [execNatsCmd kv ls]
+if {$bucket in $ls} {
+    execNatsCmd kv del $bucket -f
+}
+
 ########### DELETE ###########
 
-test key_value_mgmt-delete-1.1 "Delete bucket" -setup {
+test key_value_mgmt-delete-1 "Delete bucket" -setup {
     execNatsCmd kv add $bucket
 } -body {
     $kv del $bucket 
@@ -28,7 +34,7 @@ test key_value_mgmt-delete-1.1 "Delete bucket" -setup {
 
 ########### ADD ###########
 
-test key_value_mgmt-add-1.1 "Add bucket" -body {
+test key_value_mgmt-add-1 "Add bucket" -body {
     set result [$kv add $bucket]
 
     assert {[dict get $result did_create] eq "true"}
@@ -53,8 +59,8 @@ test key_value_mgmt-add-1.1 "Add bucket" -body {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value_mgmt-add-1.2 "Add bucket with specified arguments" -body {
-    set result [$kv add $bucket -history 5 -storage memory -ttl 200000000000 -replicas 1 -max_value_size 1000 -max_bucket_size 2000]
+test key_value_mgmt-add-2 "Add bucket with specified arguments" -body {
+    set result [$kv add $bucket -history 5 -storage memory -ttl 200000000000 -max_value_size 1000 -max_bucket_size 2000]
 
     assert {[dict get $result did_create] eq "true"}
     assert {[dict get $result config max_msgs_per_subject] == 5}
@@ -69,7 +75,7 @@ test key_value_mgmt-add-1.2 "Add bucket with specified arguments" -body {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value_mgmt-add-1.3 "Throw when adding bucket with unknown arguments" -body {
+test key_value_mgmt-add-3 "Throw when adding bucket with unknown arguments" -body {
     if {![catch {
         $kv add $bucket -unknown something
     } err errOpts]} {
@@ -79,7 +85,7 @@ test key_value_mgmt-add-1.3 "Throw when adding bucket with unknown arguments" -b
     set err
 } -result {*Unknown option*} -match glob
 
-test key_value_mgmt-add-1.4 "Throw when adding bucket with wrong -history argument" -body {
+test key_value_mgmt-add-4 "Throw when adding bucket with wrong -history argument" -body {
     if {![catch {
         $kv add $bucket -history 0
     } err errOpts]} {
@@ -91,15 +97,23 @@ test key_value_mgmt-add-1.4 "Throw when adding bucket with wrong -history argume
 
 ########### INFO ###########
 
-test key_value_mgmt-info-1.0 "Get bucket information" -setup {
+test key_value_mgmt-info-1 "Get bucket information" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket key1 value11
     execNatsCmd kv put $bucket key1 value12
     execNatsCmd kv put $bucket key2 value2
 } -body {
     set response [$kv info $bucket]
-    set api_conf [dict get $response config]
-    set api_state [dict get $response state]
+    set store_config [dict get $response store_config]
+    set store_state [dict get $response store_state]
+    set created [dict get $response created]
+
+    # "created" date is almost "now"
+    assert {abs([clock milliseconds] - $created) < 5000}
+
+    dict unset response store_config
+    dict unset response store_state
+    dict unset response created
 
     # get the same info from NATS CLI and check that they are in line
     set cli_info [json::json2dict [execNatsCmd stream info -j KV_${bucket}]]
@@ -108,26 +122,37 @@ test key_value_mgmt-info-1.0 "Get bucket information" -setup {
     set cli_config [dict get $cli_info config]
 
     # contains non-important information
-    dict unset api_conf placement
+    dict unset store_config placement
 
     nats::_ns2ms cli_config duplicate_window max_age
     set cli_state [dict get $cli_info state]
-    assert {[dict get $api_state messages] == 2}
-    assert {[dict get $api_state num_subjects] == 2}
+    assert {[dict get $store_state messages] == 2}
+    assert {[dict get $store_state num_subjects] == 2}
 
-    assert {[dict_in $api_conf $cli_config]}
-    assert {[dict_in $api_state $cli_state]}
+    assert {[dict_in $store_config $cli_config]}
+    assert {[dict_in $store_state $cli_state]}
+    assert {[dict_in $response [dict create \
+        bucket $bucket \
+        stream KV_${bucket} \
+        storage file \
+        history 1 \
+        ttl 0 \
+        max_value_size -1 \
+        max_bucket_size -1 \
+        values_stored 2 \
+        bytes_stored 119 \
+        backing_store JetStream]]}
 } -cleanup {
     execNatsCmd kv del $bucket -f
 }
 
 ########### LIST ###########
 
-test key_value_mgmt-list-1.1 "List buckets with no actual buckets" -body {
+test key_value_mgmt-list-1 "List buckets with no actual buckets" -body {
     $kv ls
 } -result ""
 
-test key_value_mgmt-list-1.2 "List buckets" -setup {
+test key_value_mgmt-list-2 "List buckets" -setup {
     execNatsCmd kv add test1
     execNatsCmd kv add test2
 } -body {
@@ -139,7 +164,7 @@ test key_value_mgmt-list-1.2 "List buckets" -setup {
 
 ########### KEYS ###########
 
-test key_value_mgmt-keys-1.1 "List keys" -setup {
+test key_value_mgmt-keys-1 "List keys" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket k1 val1
     execNatsCmd kv put $bucket k2 val2
@@ -149,7 +174,7 @@ test key_value_mgmt-keys-1.1 "List keys" -setup {
     execNatsCmd kv del $bucket -f
 }
 
-test key_value_mgmt-keys-1.2 "List keys for empty bucket returns empty array" -setup {
+test key_value_mgmt-keys-2 "List keys for empty bucket returns empty array" -setup {
     execNatsCmd kv add $bucket
 } -body {
     $kv keys $bucket 
@@ -157,7 +182,7 @@ test key_value_mgmt-keys-1.2 "List keys for empty bucket returns empty array" -s
     execNatsCmd kv del $bucket -f
 }
 
-test key_value_mgmt-keys-1.3 "List keys for deleted entries should not return them" -setup {
+test key_value_mgmt-keys-3 "List keys for deleted entries should not return them" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket k1 val1
     execNatsCmd kv del -f $bucket k1
@@ -170,7 +195,7 @@ test key_value_mgmt-keys-1.3 "List keys for deleted entries should not return th
     execNatsCmd kv del -f $bucket
 }
 
-test key_value_mgmt-keys-1.4 "Throws when there is no bucket" -body {
+test key_value_mgmt-keys-4 "Throws when there is no bucket" -body {
     if {![catch {
         $kv keys non-existing-bucket
     } err errOpts]} {

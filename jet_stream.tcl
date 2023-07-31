@@ -39,6 +39,9 @@ oo::class create ::nats::jet_stream {
         set encoded_msg [dict get $response message] ;# it is encoded in base64
         set data [binary decode base64 [dict lookup $encoded_msg data]]
         set msg [nats::msg create [dict get $encoded_msg subject] -data $data]
+        if {[$conn cget -utf8_convert]} {
+            set msg [encoding convertfrom utf-8 $msg]
+        }
         dict set msg seq [dict get $encoded_msg seq]
         dict set msg time [dict get $encoded_msg time]
         set header [binary decode base64 [dict lookup $encoded_msg hdrs]]
@@ -481,11 +484,12 @@ oo::class create ::nats::jet_stream {
         nats::_parse_args $args {
             check_bucket bool true
             timeout pos_int 0
+            read_only bool false
         }
         if {$timeout == 0} {
             set timeout $_timeout
         }
-        return [::nats::key_value new $conn [self] $timeout $check_bucket]
+        return [::nats::key_value new $conn [self] $timeout $check_bucket $read_only]
     }
     
     # userCallback args: timedOut pubAck error
