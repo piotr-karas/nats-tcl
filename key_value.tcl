@@ -116,7 +116,7 @@ oo::class create ::nats::key_value {
         return [dict get $resp seq]
     }
 
-    method update {bucket key value revision args} {
+    method update {bucket key revision value args} {
         if {$read_only} {
             throw {NATS KvReadOnly} "KV has been created in read-only mode"
         }
@@ -211,7 +211,7 @@ oo::class create ::nats::key_value {
 
     method revert {bucket key revision} {
         if {$read_only} {
-        throw {NATS KvReadOnly} "KV has been created in read-only mode"
+            throw {NATS KvReadOnly} "KV has been created in read-only mode"
         }
         my CheckBucketName $bucket
         my CheckKeyName $key
@@ -759,7 +759,7 @@ oo::class create ::nats::key_value {
                 # send End Of Initial Data signal
                 dict set watch($watchID) initial_data false
                 set callback [dict get $watch($watchID) callback]
-                after 0 [list $callback EndOfInitialData {}]
+                after 0 [list $callback end_of_initial_data {}]
             }
             if {$last_error ne ""} {
                 # there were errors before, but connection has been reestablished - notify user
@@ -786,7 +786,7 @@ oo::class create ::nats::key_value {
             # send End Of Initial Data signal
             dict set watch($watchID) initial_data false
             set callback [dict get $watch($watchID) callback]
-            after 0 [list $callback EndOfInitialData {}]
+            after 0 [list $callback end_of_initial_data {}]
         }
     }
 

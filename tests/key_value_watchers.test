@@ -174,7 +174,7 @@ test key_value_watchers-watch-1 "Watch simple key" -setup {
     sortAndCheckWatchCallbacks $::received
 } -result [list \
     [list {} [list bucket $bucket key key1 operation PUT revision 2 value value1_2]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -204,7 +204,7 @@ test key_value_watchers-watch-2 "Watch multiple keys" -setup {
     [list {} [list bucket $bucket key key1 operation PUT revision 2 value value1_2]] \
     [list {} [list bucket $bucket key key2 operation PUT revision 3 value value2_1]] \
     [list {} [list bucket $bucket key key3 operation PUT revision 4 value value3_1]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -233,7 +233,7 @@ test key_value_watchers-watch-3 "Watch key with history" -setup {
     [list {} [list bucket $bucket key key1 operation PUT revision 1 value value1_1]] \
     [list {} [list bucket $bucket key key1 operation PUT revision 2 value value1_2]] \
     [list {} [list bucket $bucket key key1 operation PUT revision 3 value value1_3]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -267,7 +267,7 @@ test key_value_watchers-watch-4 "Watch key with history, purge and delete operat
     [list {} [list bucket $bucket key key1 operation PUT revision 4 value value1_3]] \
     [list {} [list bucket $bucket key key1 operation DEL revision 5 value {}]] \
     [list {} [list bucket $bucket key key1 operation PUT revision 6 value value1_4]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -299,7 +299,7 @@ test key_value_watchers-watch-5 "Watch key with headers only and history, with p
     [list {} [list bucket $bucket key key1 operation PUT revision 3 value {}]] \
     [list {} [list bucket $bucket key key1 operation DEL revision 4 value {}]] \
     [list {} [list bucket $bucket key key1 operation PUT revision 5 value {}]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -329,7 +329,7 @@ test key_value_watchers-watch-6 "Watch key with history and ignore deletes" -set
 } -result [list \
     [list {} [list bucket $bucket key key1 operation PUT revision 3 value value1_2]] \
     [list {} [list bucket $bucket key key1 operation PUT revision 5 value value1_3]] \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
 ] -cleanup {
     $kv unwatch $watchID
     execNatsCmd kv del $bucket -f
@@ -354,7 +354,7 @@ test key_value_watchers-watch-7 "Watch key with updates only" -setup {
 
     sortAndCheckWatchCallbacks $::received
 } -result [list \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
     [list {} [list bucket $bucket key key1 operation PUT revision 2 value value1_2]] \
 ] -cleanup {
     $kv unwatch $watchID
@@ -384,7 +384,7 @@ test key_value_watchers-watch-8 "Watching key should continue after server resta
 
     sortAndCheckWatchCallbacks $::received
 } -result [list \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
     [list {} [list bucket $bucket key key1 operation PUT revision 1 value value1_1]] \
 ] -cleanup {
     $kv unwatch $watchID
@@ -413,7 +413,7 @@ test key_value_watchers-watch-9 "Watching key should continue and user should bo
 
     sortAndCheckWatchCallbacks $::received
 } -result [list \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
     [list error "Server disconnected"] \
     [list ok {}] \
     [list {} [list bucket $bucket key key1 operation PUT revision 1 value value1_1]] \
@@ -456,7 +456,7 @@ test key_value_watchers-watch-10 "Watching key should continue and consumer shou
 
     sortAndCheckWatchCallbacks $::received
 } -result [list \
-    [list EndOfInitialData {}] \
+    [list end_of_initial_data {}] \
     [list {} [list bucket $bucket key key1 operation PUT revision 1 value value1_1]] \
 ] -cleanup {
     $kv unwatch $watchID

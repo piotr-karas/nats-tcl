@@ -244,7 +244,7 @@ test key_value-update-1 "Update key" -setup {
     execNatsCmd kv add $bucket
     execNatsCmd kv put $bucket key1 some_val
 } -body {
-    $kv update $bucket key1 value1 1
+    $kv update $bucket key1 1 value1
 } -result {2} -cleanup {
     execNatsCmd kv del $bucket -f
 }
@@ -254,7 +254,7 @@ test key_value-update-2 "Throw WrongLastSequence if revision does not match with
     execNatsCmd kv put $bucket key1 some_val
 } -body {
     if {![catch {
-        $kv update $bucket key1 value1 2
+        $kv update $bucket key1 2 value1
     } err errOpts]} {
         throw {TEST DidNotThrow} "Did not throw"
     }
@@ -266,7 +266,7 @@ test key_value-update-2 "Throw WrongLastSequence if revision does not match with
 
 test key_value-update-3 "Throw BucketNotFound when calling update on non-existing bucket with -check_bucket set to true" -body {
     if {![catch {
-        $kv update "non-existing-bucket" key1 value1 1 -check_bucket true
+        $kv update "non-existing-bucket" key1 1 value1 -check_bucket true
     } err errOpts]} {
         throw {TEST DidNotThrow} "Did not throw"
     }
@@ -276,7 +276,7 @@ test key_value-update-3 "Throw BucketNotFound when calling update on non-existin
 
 test key_value-update-4 "Throw NoResponders/Timeout when calling update on non-existing bucket with -check_bucket set to false" -body {
     if {![catch {
-        $kv update "non-existing-bucket" key1 value1 1 -check_bucket false
+        $kv update "non-existing-bucket" key1 1 value1 -check_bucket false
     } err errOpts]} {
         throw {TEST DidNotThrow} "Did not throw"
     }
