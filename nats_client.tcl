@@ -1350,7 +1350,7 @@ proc ::nats::timestamp {} {
 proc ::nats::time_to_millis {time} {
   set seconds 0
   if {[regexp -all {^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2}).(\d+)Z$} $time -> year month day hour minute second micro]} {
-    set millis [format %d [string range $micro 0 2]]
+    scan [string range $micro 0 2] %d millis ;# could be "081" that would be treated as octal number
     set seconds [clock scan "${year}-${month}-${day} ${hour}:${minute}:${second}" -format "%Y-%m-%d %T" -gmt 1]
     return  [expr {$seconds *  1000 + $millis}]
   }

@@ -8,6 +8,7 @@ oo::class create ::nats::key_value {
     variable conn
     variable status_var
     variable js
+    variable kv_prefix
     variable check_bucket_default
     variable read_only
 
@@ -15,10 +16,15 @@ oo::class create ::nats::key_value {
     variable requests
     variable watch
 
-    constructor {connection jet_stream timeout check_bucket rd_only} {
+    constructor {connection jet_stream domain_name timeout check_bucket rd_only} {
         set conn $connection
         set status_var [${connection}::my varname status]
         set js $jet_stream
+        if {$domain_name eq ""} {
+            set kv_prefix "\$KV"
+        } else {
+            set kv_prefix "\$JS.${domain_name}.API.\$KV"
+        }
         set check_bucket_default $check_bucket
         set read_only $rd_only
 
@@ -36,13 +42,13 @@ oo::class create ::nats::key_value {
         }
 
         set stream "KV_${bucket}"
-        set subject "\$KV.${bucket}.${key}"
+        set subject "\$KV.*.${key}"
 
         try {
             if {[info exists revision]} {
                 set resp [$js stream_msg_get $stream -seq $revision]
 
-                if {[dict exists $resp subject] && [dict get $resp subject] ne $subject} {
+                if {[dict exists $resp subject] && [lindex [my SubjectToBucketKey [dict get $resp subject]] 1] ne $key} {
                     throw {NATS KeyNotFound} "Key ${key} not found"
                 }
             } else {
@@ -78,11 +84,15 @@ oo::class create ::nats::key_value {
             check_bucket bool $check_bucket_default \
         ]
 
+        set subject "${kv_prefix}.${bucket}.${key}"
+
         if {$check_bucket} {
-            my _checkBucket $bucket
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
         }
 
-        set subject "\$KV.${bucket}.${key}"
         set resp [$js publish $subject $value]
         return [dict get $resp seq]
     }
@@ -98,11 +108,14 @@ oo::class create ::nats::key_value {
             check_bucket bool $check_bucket_default \
         ]
 
-        if {$check_bucket} {
-            my _checkBucket $bucket
-        }
+        set subject "${kv_prefix}.${bucket}.${key}"
 
-        set subject "\$KV.${bucket}.${key}"
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
+        }
 
         set msg [nats::msg create $subject -data $value]
         nats::header set msg Nats-Expected-Last-Subject-Sequence 0
@@ -127,11 +140,14 @@ oo::class create ::nats::key_value {
             check_bucket bool $check_bucket_default \
         ]
 
-        if {$check_bucket} {
-            my _checkBucket $bucket
-        }
+        set subject "${kv_prefix}.${bucket}.${key}"
 
-        set subject "\$KV.${bucket}.${key}"
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
+        }
 
         set msg [nats::msg create $subject -data $value]
         nats::header set msg Nats-Expected-Last-Subject-Sequence $revision
@@ -164,11 +180,14 @@ oo::class create ::nats::key_value {
         ]
 
         if {$check_bucket} {
-            my _checkBucket $bucket
+            set config [my _checkBucket $bucket]
         }
 
         if {$key ne ""} {
-            set subject "\$KV.${bucket}.${key}"
+            set subject "${kv_prefix}.${bucket}.${key}"
+            if {[info exists config] && [dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
             set msg [nats::msg create $subject]
             nats::header set msg KV-Operation DEL
             set resp [$js publish_msg $msg]
@@ -196,11 +215,14 @@ oo::class create ::nats::key_value {
             check_bucket bool $check_bucket_default \
         ]
 
-        if {$check_bucket} {
-            my _checkBucket $bucket
-        }
+        set subject "${kv_prefix}.${bucket}.${key}"
 
-        set subject "\$KV.${bucket}.${key}"
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
+        }
 
         set msg [nats::msg create $subject]
         nats::header set msg KV-Operation PURGE Nats-Rollup sub
@@ -209,21 +231,32 @@ oo::class create ::nats::key_value {
         return $resp
     }
 
-    method revert {bucket key revision} {
+    method revert {bucket key revision args} {
         if {$read_only} {
             throw {NATS KvReadOnly} "KV has been created in read-only mode"
         }
         my CheckBucketName $bucket
         my CheckKeyName $key
 
+        nats::_parse_args $args [list \
+            check_bucket bool $check_bucket_default \
+        ]
+
+        set subject "${kv_prefix}.${bucket}.${key}"
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "[dict get $config mirror bucket_subject].${key}"
+            }
+        }
+
         set entry [my get $bucket $key -revision $revision]
 
-        set subject "\$KV.${bucket}.${key}"
         set resp [$js publish $subject [dict get $entry value]]
         return [dict get $resp seq]
     }
 
-    # check stream info to know if given stream even exists, in order to not wait for timeout if it doesn't
+    # check stream info to know if given stream even exists (or is mirror of another stream), in order to not wait for timeout if it doesn't
     method _checkBucket {bucket} {
         set stream "KV_${bucket}"
         try {
@@ -231,6 +264,29 @@ oo::class create ::nats::key_value {
         } trap {NATS ErrJSResponse 404 10059} {} {
             throw {NATS BucketNotFound} "Bucket ${bucket} not found"
         }
+
+        if {[dict exists $stream_info mirror name]} {
+            # kv is mirrored
+            set mirrored_stream_name [dict get $stream_info mirror name]
+            set mirrored_kv_name [string range $mirrored_stream_name 3 end] ;# remove "KV_" from "KV_bucket_name"
+            
+            set config [dict create \
+                mirror [dict create \
+                    bucket_name $mirrored_kv_name \
+                    bucket_subject "\$KV.${mirrored_kv_name}" \
+                ] \
+            ]
+
+            if {[dict exists $stream_info mirror external api] && [dict get $stream_info mirror external api] ne ""} {
+                set external_api [dict get $stream_info mirror external api]
+                dict set config mirror external_api $external_api
+                dict set config mirror bucket_subject "${external_api}.\$KV.${mirrored_kv_name}"
+            }
+
+            return $config
+        }
+
+        return [dict create]
     }
 
     ########## ADVANCED ##########
@@ -246,18 +302,26 @@ oo::class create ::nats::key_value {
             set args [lrange $args 1 end]
         }
 
+        if {$key eq ""} {
+            set key ">"
+        }
+
         set spec [list \
             timeout pos_int $_timeout \
+            check_bucket bool $check_bucket_default \
         ]
-                
         nats::_parse_args $args $spec
 
         set stream "KV_${bucket}"
-        if {$key eq ""} {
-            set subject "\$KV.${bucket}.>"
-        } else {
-            set subject "\$KV.${bucket}.${key}"
+        set subject "\$KV.${bucket}.${key}"
+
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "\$KV.[dict get $config mirror bucket_name].${key}"
+            }
         }
+
         set deliver_subject [$conn inbox]
 
         # get unique ID that will be used to send "add_consumer" request
@@ -332,6 +396,10 @@ oo::class create ::nats::key_value {
             set args [lrange $args 1 end]
         }
 
+        if {$key eq ""} {
+            set key ">"
+        }
+
         set spec [list \
             callback valid_str null \
             include_history bool false \
@@ -339,9 +407,15 @@ oo::class create ::nats::key_value {
             headers_only bool false \
             ignore_deletes bool false \
             idle_heartbeat pos_int 5000 \
+            check_bucket bool $check_bucket_default \
         ]
-                
+
         nats::_parse_args $args $spec
+
+        if {![info exists callback]} {
+            throw {NATS ErrInvalidArg} "Callback option should be specified"
+        }
+
         return [my WatchImpl $bucket $key \
             -callback $callback \
             -include_history $include_history \
@@ -349,6 +423,7 @@ oo::class create ::nats::key_value {
             -headers_only $headers_only \
             -ignore_deletes $ignore_deletes\
             -idle_heartbeat $idle_heartbeat \
+            -check_bucket $check_bucket \
         ]
     }
 
@@ -363,6 +438,7 @@ oo::class create ::nats::key_value {
             headers_only bool false \
             ignore_deletes bool false \
             idle_heartbeat pos_int 5000 \
+            check_bucket bool $check_bucket_default \
             \
             stream_seq pos_int null \
             watch_id pos_int null \
@@ -372,16 +448,15 @@ oo::class create ::nats::key_value {
                 
         nats::_parse_args $args $spec
 
-        if {![info exists callback]} {
-            throw {NATS ErrInvalidArg} "Callback option should be specified"
+        set stream "KV_${bucket}"
+        set subject "\$KV.${bucket}.${key}"
+        if {$check_bucket} {
+            set config [my _checkBucket $bucket]
+            if {[dict exists $config mirror]} {
+                set subject "\$KV.[dict get $config mirror bucket_name].${key}"
+            }
         }
 
-        set stream "KV_${bucket}"
-        if {$key eq ""} {
-            set subject "\$KV.${bucket}.>"
-        } else {
-            set subject "\$KV.${bucket}.${key}"
-        }
         set deliver_subject [$conn inbox]
 
         if {[info exists watch_id]} {
@@ -402,6 +477,7 @@ oo::class create ::nats::key_value {
             headers_only $headers_only \
             ignore_deletes $ignore_deletes \
             idle_heartbeat $idle_heartbeat \
+            check_bucket $check_bucket \
             deliver_subject $deliver_subject \
             initial_data $initial_data \
             last_error $last_error \
@@ -515,7 +591,6 @@ oo::class create ::nats::key_value {
         }
         my CheckBucketName $bucket
         set stream "KV_${bucket}"
-        set subject "\$KV.${bucket}.>"
 
         set options {
             -storage file
@@ -534,11 +609,13 @@ oo::class create ::nats::key_value {
         }
 
         set argsMap {
-            -history -max_msgs_per_subject
-            -storage -storage
-            -ttl -max_age
-            -max_value_size -max_msg_size
-            -max_bucket_size -max_bytes
+            -history            -max_msgs_per_subject
+            -storage            -storage
+            -ttl                -max_age
+            -max_value_size     -max_msg_size
+            -max_bucket_size    -max_bytes
+            -mirror_name        -mirror
+            -mirror_domain      -mirror
         }
 
         if {[llength $args] % 2} {
@@ -546,27 +623,43 @@ oo::class create ::nats::key_value {
         }
 
         dict for {key value} $args {
-        if {![dict exists $argsMap $key]} {
-            throw {NATS ErrInvalidArg} "Unknown option ${key}. Should be one of [dict keys $argsMap]"
-        }
-        switch -- $key {
-            -history {
-                if {$value < 1} {
-                    throw {NATS ErrInvalidArg} "history must be greater than 0"
-                }
-                if {$value > 64} {
-                    throw {NATS ErrInvalidArg} "history must be less than 64"
-                }
-
-                dict set options [dict get $argsMap $key] $value
+            if {![dict exists $argsMap $key]} {
+                throw {NATS ErrInvalidArg} "Unknown option ${key}. Should be one of [dict keys $argsMap]"
             }
-            default {
-                dict set options [dict get $argsMap $key] $value
+            switch -- $key {
+                -history {
+                    if {$value < 1} {
+                        throw {NATS ErrInvalidArg} "history must be greater than 0"
+                    }
+                    if {$value > 64} {
+                        throw {NATS ErrInvalidArg} "history must be less than 64"
+                    }
+
+                    dict set options [dict get $argsMap $key] $value
+                }
+                -mirror_domain {
+                    # mirror_domain is taken care of in "mirror_name"
+                }
+                -mirror_name {
+                    set mirror_info [dict create name "KV_${value}"]
+                    if {[dict exists $args "-mirror_domain"]} {
+                        dict set mirror_info external api "\$JS.[dict get $args "-mirror_domain"].API"
+                    }
+                    dict set options [dict get $argsMap $key] $mirror_info
+                }
+                default {
+                    dict set options [dict get $argsMap $key] $value
+                }
             }
         }
+
+        if {![dict exists $args -mirror_name]} {
+            # when kv is mirroring it does not listen on normal subjects
+            set subject "\$KV.${bucket}.>"
+            lappend options -subjects $subject
         }
 
-        return [$js add_stream $stream -subjects $subject {*}$options]
+        return [$js add_stream $stream {*}$options]
     }
 
     method info {bucket} {
@@ -583,6 +676,10 @@ oo::class create ::nats::key_value {
             dict set kv_info ttl [dict get $stream_info config max_age]
             dict set kv_info max_value_size [dict get $stream_info config max_msg_size]
             dict set kv_info max_bucket_size [dict get $stream_info config max_bytes]
+
+            if {[dict exists $stream_info mirror]} {
+                dict set kv_info mirror [dict get $stream_info mirror]
+            }
 
             dict set kv_info created [nats::time_to_millis [dict get $stream_info created]]
             dict set kv_info values_stored [dict get $stream_info state messages]
@@ -615,11 +712,11 @@ oo::class create ::nats::key_value {
         set spec [list \
             timeout pos_int $_timeout \
         ]
-                
+
         nats::_parse_args $args $spec
 
         set stream "KV_${bucket}"
-        set subject "\$KV.${bucket}.>"
+        set subject "\$KV.*.>" ;# bucket is not set in case it comes from a different domain
         set deliver_subject [$conn inbox]
 
         # get unique ID that will be used to send "add_consumer" request
@@ -628,10 +725,10 @@ oo::class create ::nats::key_value {
 
         set requests($reqID) [dict create bucket $bucket timeout false num_received 0]
         set subscription [$conn subscribe $deliver_subject -dictmsg true -callback [mymethod MessageReceived $reqID]]
-        
+
         # make sure it will return someday
         after $timeout [mymethod MessageReceived $reqID "" "" "" 1]
-        
+
         try {
             set consumer [$js add_consumer $stream \
                 -deliver_policy "last_per_subject" \
@@ -672,13 +769,13 @@ oo::class create ::nats::key_value {
             if {[dict exists $msg header]} {
                 set operation [nats::header lookup $msg KV-Operation ""]
                 if {$operation in [list "DEL" "PURGE"]} {
-                # key was deleted - do not add it
-                continue;
+                    # key was deleted - do not add it
+                    continue;
                 }
             }
 
             set subject [dict get $msg subject]
-            lappend keys [string range $subject [expr {5 + [string length $bucket]}] end]
+            lappend keys [join [lrange [split $subject "."] 2 end] "."]
         }
 
         return $keys
@@ -824,6 +921,7 @@ oo::class create ::nats::key_value {
                 -updates_only [dict get $watch($watchID) updates_only] \
                 -headers_only [dict get $watch($watchID) headers_only] \
                 -ignore_deletes [dict get $watch($watchID) ignore_deletes] \
+                -check_bucket [dict get $watch($watchID) check_bucket] \
                 -idle_heartbeat [dict get $watch($watchID) idle_heartbeat] \
                 -watch_id $watchID \
                 -initial_data [dict get $watch($watchID) initial_data] \
@@ -895,7 +993,7 @@ oo::class create ::nats::key_value {
         # return list of bucket and key from subject
         set parts [split $subject "."]
         set bucket [lindex $parts 1]
-        set key [lindex $parts 2]
+        set key [join [lindex $parts 2 end] "."]
         return [list $bucket $key]
     }
 

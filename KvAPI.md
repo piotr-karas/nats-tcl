@@ -10,12 +10,12 @@ Key-Value functionality of NATS can be accessed by creating the `nats::key_value
 [*kv* update *bucket key revision value* ?-check_bucket *check_bucket*?](#kv-update-bucket-key-revision-value--check_bucket-check_bucket)<br/>
 [*kv* del *bucket* ?*key*? ?-check_bucket *check_bucket*?](#kv-del-bucket-key--check_bucket-check_bucket)<br/>
 [*kv* purge *bucket key* ?-check_bucket *check_bucket*?](#kv-purge-bucket-key--check_bucket-check_bucket)<br/>
-[*kv* revert *bucket key revision*](#kv-revert-bucket-key-revision)<br/>
-[*kv* history *bucket key* ?-timeout *timeout*?](#kv-history-bucket-key--timeout-timeout)<br/>
-[*kv* watch *bucket* ?*key*? ?-callback *callback*? ?-include_history *include_history*? ?-updates_only *updates_only*? ?-headers_only *headers_only*? ?-ignore_deletes *ignore_deletes*? ?-idle_heartbeat *idle_heartbeat*?](#kv-watch-bucket-key--callback-callback--include_history-include_history--updates_only-updates_only--headers_only-headers_only--ignore_deletes-ignore_deletes--idle_heartbeat-idle_heartbeat)<br/>
+[*kv* revert *bucket key revision* ?-check_bucket *check_bucket*?](#kv-revert-bucket-key-revision--check_bucket-check_bucket)<br/>
+[*kv* history *bucket key* ?-timeout *timeout*? ?--check_bucket-check_bucket *check_bucket*?](#kv-history-bucket-key--timeout-timeout-check_bucket)<br/>
+[*kv* watch *bucket* ?*key*? ?-callback *callback*? ?-include_history *include_history*? ?-updates_only *updates_only*? ?-headers_only *headers_only*? ?-ignore_deletes *ignore_deletes*? ?-idle_heartbeat *idle_heartbeat*? ?-check_bucket *check_bucket*?](#kv-watch-bucket-key--callback-callback--include_history-include_history--updates_only-updates_only--headers_only-headers_only--ignore_deletes-ignore_deletes--idle_heartbeat-idle_heartbeat--check_bucket-check_bucket)<br/>
 [*kv* unwatch *watchId*](#kv-unwatch-watchid)<br/>
 
-[*kv* add *bucket* ?-history *history*? ?-storage *storage*? ?-ttl *ttl*? ?-max_value_size *max_value_size*? ?-max_bucket_size *max_bucket_size*?](#kv-add-bucket--history-history--storage-storage--ttl-ttl--max_value_size-max_value_size--max_bucket_size-max_bucket_size)<br/>
+[*kv* add *bucket* ?-history *history*? ?-storage *storage*? ?-ttl *ttl*? ?-max_value_size *max_value_size*? ?-max_bucket_size *max_bucket_size*? ?-mirror_name *mirror_name*? ?-mirror_domain *mirror_domain*?](#kv-add-bucket--history-history--storage-storage--ttl-ttl--max_value_size-max_value_size--max_bucket_size-max_bucket_size--mirror_name-mirror_name--mirror_domain-mirror_domain)<br/>
 [*kv* info *bucket*](#kv-info-bucket)<br/>
 [*kv* ls](#kv-ls)<br/>
 [*kv* keys *bucket* ?-timeout *timeout*?](#kv-keys-bucket--timeout-timeout)<br/>
@@ -49,10 +49,12 @@ Finally, you can even do things that typically can not be done with a Key/Value 
 
 Implementation is based mainly on official [guidelines](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md) and `nats-cli` client. It supports all main methods and work comparably to other clients. It is worth noticing that:
 - `-utf8_convert` option on core nats client is also applicable to all KV operations, so when it is `true` than all incoming/outgoing messages are automatically converted. 
-- `-check_bucket` on a lot of methods can be used to override configuration of KV object (`$js key_value -check_bucket true`). It takes care of checking if bucket exists, before sending requests to one. If it is disabled and given bucket does not exists than timeout will be fired (or `NoResponders`) instead of throwing a `BucketNotFound` error.
+- `-check_bucket` on a lot of methods can be used to override configuration of KV object (`$js key_value -check_bucket true`). It takes care of checking if bucket exists, before sending requests to one. If it is disabled and given bucket does not exists than in most cases timeout will be fired (or `NoResponders`) instead of throwing a `BucketNotFound` error. It also receives information about kv mirror and depending on that takes care of properly handling api request. So when kv is a mirror and `-check_bucket` is disabled it probably won't work the way it should. Disabling it would mean sending less requests and therefore requests will be quicker, but do it only in certain scenarios: when kv is existing for sure and it is not a mirror. 
 - most of methods checks if `bucket` and `key` names are valid. `bucket` could only contain letters, numbers, `_` and `-`. `key` could also contain `/`, `=` and `.` (but it cannot start or end with `.` and cannot start with `_kv`).
 - KV object can be configured as read-only (`$js key_value -read_only true`). In this mode operations that modify keys or bucket are disabled (this operations will throw `KvReadOnly`).
-- in addition to all core NATS and JetStream errors, the `key_value` methods may throw `KeyNotFound`, `BucketNotFound`, `WrongLastSequence` and `KvReadOnly` errors based on situation.
+- in addition to all core NATS and JetStream errors, the `key_value` methods may throw `KeyNotFound`, `BucketNotFound`, `WrongLastSequence` and `KvReadOnly` errors based on situation,
+- `cross-domain` requests are supported (`domain` is copied from `jet_stream` object) so acting on kv from another domain is possible (see examples),
+- `mirroring` (as well as `cross-domain` mirroring) is supported.
 
 ## Entry
 
@@ -90,16 +92,16 @@ Deletes a `key` or the entire `bucket` if no `key` is supplied (preserves histor
 
 Deletes a `key` from the `bucket`, clearing history before creating a delete marker.
 
-### kv revert *bucket key revision*
+### kv revert *bucket key revision* ?-check_bucket *check_bucket*?
 
 Reverts a value to a previous `revision` using put. It simply gets `revision` of `key` and puts it again.
 
-### kv history *bucket key* ?-timeout *timeout*?
+### kv history *bucket key* ?-timeout *timeout*? ?-check_bucket *check_bucket*?
 
 Gets the full history for a `key`. In order to do that, under the hood ephemeral consumer is created that gets necessary messages and returns when all required entries has been gathered. 
 `-timeout` can override default configuration.
 
-### kv watch *bucket* ?*key*? ?-callback *callback*? ?-include_history *include_history*? ?-updates_only *updates_only*? ?-headers_only *headers_only*? ?-ignore_deletes *ignore_deletes*? ?-idle_heartbeat *idle_heartbeat*?
+### kv watch *bucket* ?*key*? ?-callback *callback*? ?-include_history *include_history*? ?-updates_only *updates_only*? ?-headers_only *headers_only*? ?-ignore_deletes *ignore_deletes*? ?-idle_heartbeat *idle_heartbeat*? ?-check_bucket *check_bucket*?
 
 Watch the `bucket` or a specific `key` for updates.
 It takes care of receiving healthcheck (`idle_heartbeat`) from server and re-create consumer if necessary.
@@ -124,7 +126,7 @@ Returns `watchId` which can be used to stop watching for changes.
 
 Stop watching previously started `watch`.
 
-### kv add *bucket* ?-history *history*? ?-storage *storage*? ?-ttl *ttl*? ?-max_value_size *max_value_size*? ?-max_bucket_size *max_bucket_size*?
+### kv add *bucket* ?-history *history*? ?-storage *storage*? ?-ttl *ttl*? ?-max_value_size *max_value_size*? ?-max_bucket_size *max_bucket_size*? ?-mirror_name *mirror_name*? ?-mirror_domain *mirror_domain*?
 
 Adds a new KV Store Bucket `bucket`. It can be configured using following parameters:
 - `history` - default `1`, how many messages per key should be kept. By default only last one is preserved,
@@ -132,11 +134,12 @@ Adds a new KV Store Bucket `bucket`. It can be configured using following parame
 - `ttl` - default `-1`, how long the bucket keeps values for,
 - `max_value_size` - default `-1`, what is max size of message (bytes),
 - `max_bucket_size` - default `-1`, max `bucket` size can be configured.
-
+- `mirror_name` - creates a mirror of a different bucket,
+- `mirror_domain` - when mirroring find the bucket in a different domain.
 ### kv info *bucket*
 
 View the status of a KV store `bucket`.
-Returns dict containing `bucket`, `stream`, `storage`, `history`, `ttl`, `max_value_size`, `max_bucket_size` as well as other information: `created` (in milliseconds), `values_stored`, `bytes_stored`, `backing_store` and `store_config`, `store_state` - last two of them contains full configuration of underlying JetStream.
+Returns dict containing `bucket`, `stream`, `storage`, `history`, `ttl`, `max_value_size`, `max_bucket_size` (and optionally `mirror`) as well as other information: `created` (in milliseconds), `values_stored`, `bytes_stored`, `backing_store` and `store_config`, `store_state` - last two of them contains full configuration of underlying JetStream.
 
 ### kv ls
 
